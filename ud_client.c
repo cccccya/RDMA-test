@@ -84,8 +84,8 @@ init_ctx(struct ibv_device *ib_dev, int size, int port)
     }
 
     ctx->size = size;
-    //ctx->send_flags = IBV_SEND_SIGNALED;
-    ctx->send_flags = IBV_SEND_INLINE;
+    ctx->send_flags = IBV_SEND_SIGNALED;
+    //ctx->send_flags = IBV_SEND_INLINE;
     ctx->buf = memalign(page_size, size + 40);
     if(!ctx->buf) {
         printf("ctx->buf malloc error\n");
@@ -153,18 +153,13 @@ init_ctx(struct ibv_device *ib_dev, int size, int port)
             .qp_type = IBV_QPT_UD,
         };
         init_attr.sq_sig_all = 1;
-        init_attr.cap.max_inline_data = ctx->size;
+        //init_attr.cap.max_inline_data = ctx->size;
         ctx->qp = ibv_create_qp(ctx->pd, &init_attr);
         if (!ctx->qp)  {
             printf("Couldn't create QP\n");
             goto clean_cq;
         }
         ibv_query_qp(ctx->qp, &attr, IBV_QP_CAP, &init_attr);
-        
-        /*if (init_attr.cap.max_inline_data >= size) {
-            printf("inline on\n");
-            ctx->send_flags |= IBV_SEND_INLINE;
-        }*/
     }
 
     {
@@ -329,7 +324,7 @@ connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
         return 1;
     }
     gettimeofday(&end_qp, NULL);
-    long qp_time = (end_qp.tv_usec - start_qp.tv_usec); // get the run time by microsecond
+    long qp_time = (end_qp.tv_sec-start_qp.tv_sec)*1000000+(end_qp.tv_usec-start_qp.tv_usec);
     printf("qp:%ld ",qp_time);
 
     if (dest->gid.global.interface_id) {
@@ -366,7 +361,6 @@ client(const char *servername, int port,
     serv_addr.sin_addr.s_addr = inet_addr(servername);
     if(connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr))<0) {
         close(sockfd);
-        perror("connect error\n");
         printf("connect error\n");
         return NULL;
     }
@@ -396,13 +390,58 @@ out:
     return rem_dest;
 }
 
+static int poll_completion(struct pingpong_context *res) {
+    struct timeval start_work, end_work;
+    gettimeofday(&start_work, NULL);
+
+    struct ibv_wc wc;
+    unsigned long start_time_msec;
+    unsigned long cur_time_msec;
+    struct timeval cur_time;
+    int poll_result;
+    int rc = 0;
+    /* 获取当前时间 */
+    gettimeofday(&cur_time, NULL);
+    start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
+    do {
+        poll_result = ibv_poll_cq(res->cq, 1, &wc);
+        gettimeofday(&cur_time, NULL);
+        cur_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
+    } while((poll_result == 0) && ((cur_time_msec - start_time_msec) < 5000));
+    if(poll_result < 0) {
+        fprintf(stderr, "无法完成完成队列\n");
+        rc = 1;
+    } else if(poll_result == 0) {
+        fprintf(stderr, "完成队列超时\n");
+        rc = 1;
+    } else {
+        //fprintf(stdout, "完成队列完成\n");
+        /* 检查完成的操作是否成功 */
+        if(wc.status != IBV_WC_SUCCESS) {
+            fprintf(stderr, "完成的操作失败，错误码=0x%x，vendor_err=0x%x\n", wc.status, wc.vendor_err);
+            rc = 1;
+        }
+        if(wc.opcode & IBV_WC_RECV) {
+            printf("IBV_WC_RECV ok, %s\n", res->buf + 40);
+        }
+        else if(wc.opcode == IBV_WC_SEND){
+            gettimeofday(&end_work, NULL);
+            long work_time = (end_work.tv_sec-start_work.tv_sec)*1000000+(end_work.tv_usec-start_work.tv_usec);
+            printf("work:%ld ",work_time);
+            //printf("IBV_WC_SEND ok\n");
+        }
+        rc = 0;
+    }
+    return rc;
+}
+
 int main(int argc, char **argv)
 {    
-    char teststr[5000];memset(teststr,0,sizeof(teststr));
-    for(int i=0;i<1024;i++)teststr[i]='a';
-    
     //freopen("T","w",stdout);
-    struct timeval start, end;  // define 2 struct timeval variables
+    char teststr[5000];memset(teststr,0,sizeof(teststr));
+    for(int i=0;i<5000;i++)teststr[i]='a';
+    
+    struct timeval start, tmp, end;  // define 2 struct timeval variables
     gettimeofday(&start, NULL); // get the beginning time
 
     struct ibv_device      **dev_list;
@@ -413,48 +452,11 @@ int main(int argc, char **argv)
     int                      ib_port = 1;
     int                      gidx = 1;
     int                      sl = 0;
-    unsigned int             size = 900;
+    unsigned int             size = 1024;
     char                     gid[33];
     char                    *servername = NULL;
     srand48(getpid() * time(NULL));
-    while (1) {
-        int c;
-        static struct option long_options[] = {
-            { .name = "port",     .has_arg = 1, .val = 'p' },
-            { .name = "ib-port",  .has_arg = 1, .val = 'i' },
-            { .name = "size",     .has_arg = 1, .val = 's' },
-            { .name = "sl",       .has_arg = 1, .val = 'l' },
-            {}
-        };
-
-        c = getopt_long(argc, argv, "p:i:s:r:l", long_options, NULL);
-        if (c == -1)
-            break;
-
-        switch (c) {
-        case 'p':
-            port = strtol(optarg, NULL, 0);
-            if (port > 65535) {
-                return 1;
-            }
-            break;
-        case 'i':
-            ib_port = strtol(optarg, NULL, 0);
-            if (ib_port < 1) {
-                return 1;
-            }
-            break;
-        case 's':
-            size = strtoul(optarg, NULL, 0);
-            break;
-        case 'l':
-            sl = strtol(optarg, NULL, 0);
-            break;
-        default:
-            return 1;
-        }
-    }
-
+    
     /*获取IP*/
     if (optind == argc - 1)
         servername = strdup(argv[optind]);
@@ -480,8 +482,8 @@ int main(int argc, char **argv)
         printf("init_ctx error\n");
         return -1;
     }
-
     post_recv(ctx);
+
     if(ibv_req_notify_cq(ctx->cq, 0)){
         printf("ibv_req_notify_cq error\n");
         return -1;
@@ -516,7 +518,7 @@ int main(int argc, char **argv)
         return -1;
     }
     gettimeofday(&end_con, NULL);
-    long conn_time = (end_con.tv_usec - start_con.tv_usec);
+    long conn_time = (end_con.tv_sec-start_con.tv_sec)*1000000+(end_con.tv_usec-start.tv_usec);
     printf("con:%ld ",conn_time);
 
 
@@ -525,44 +527,21 @@ int main(int argc, char **argv)
     //       rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
     if(connect_ctx(ctx, ib_port, my_dest.psn, sl, rem_dest, gidx)) {
-        printf("connect_ctx \n");
+        printf("connect_ctx error\n");
         return -1;
     }
 
-    //strncpy(ctx->buf + 40, "cya viscore client", sizeof "cya visocre client");
-    strncpy(ctx->buf + 40, teststr, ctx->size);
+    //准备buff
+    memcpy(ctx->buf + 40, teststr, ctx->size);
     if (post_send(ctx, rem_dest->qpn)) {
         printf("Couldn't post send\n");
         return -1;
     }
-    struct timeval start_work, end_work;  // define 2 struct timeval variables
-    gettimeofday(&start_work, NULL); // get the beginning time
 
-    int event_num = 0;
-    while (event_num < 1) {
-        struct ibv_cq *cq;
-        struct ibv_wc wc;
-        void *ex_ctx;
-
-        ibv_get_cq_event(ctx->channel, &cq, &ex_ctx);
-        ibv_ack_cq_events(cq, 1);
-        event_num++;
-        ibv_req_notify_cq(cq, 0);
-
-        while(ibv_poll_cq(cq, 1, &wc)) {
-            if(wc.status != IBV_WC_SUCCESS){
-                printf("wc.status != IBV_WC_SUCCESS\n");
-            }
-            if(wc.opcode & IBV_WC_RECV) {
-                printf("IBV_WC_RECV ok, %s\n", ctx->buf + 40);
-            }
-            else if(wc.opcode == IBV_WC_SEND){
-                gettimeofday(&end_work, NULL);
-                long work_time = (end_work.tv_usec - start_work.tv_usec); // get the run time by microsecond
-                printf("work:%ld ",work_time);
-                //printf("IBV_WC_SEND ok\n");
-            }
-        }
+    if(poll_completion(ctx)) {
+        fprintf(stderr, "无法完成操作\n");
+        close_ctx(ctx);
+        return 0;
     }
 
     if(close_ctx(ctx)){
@@ -573,8 +552,8 @@ int main(int argc, char **argv)
     free(rem_dest);
 
     gettimeofday(&end, NULL);  // get the end time
-    long long total_time = (end.tv_usec - start.tv_usec);
+    long long total_time = (end.tv_sec-start.tv_sec)*1000000+(end.tv_usec-start.tv_usec);
     printf("total:%lld\n",total_time);
-    printf("%ld %ld\n",start.tv_usec,end.tv_usec);
+    usleep(100000);
     return 0;
 }

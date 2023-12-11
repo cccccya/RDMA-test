@@ -22,7 +22,6 @@ static int page_size;
 
 struct pingpong_context {
     struct ibv_context  *context;
-    struct ibv_comp_channel *channel;
     struct ibv_pd       *pd;
     struct ibv_mr       *mr;
     struct ibv_cq       *cq;
@@ -91,7 +90,6 @@ init_ctx(struct ibv_device *ib_dev, int size, int port)
     }
 
     memset(ctx->buf, 0, size + 40);
-    strncpy(ctx->buf + 40, "viscore server", sizeof "visocre server");
 
     ctx->context = ibv_open_device(ib_dev);
     if(!ctx->context) {
@@ -114,16 +112,10 @@ init_ctx(struct ibv_device *ib_dev, int size, int port)
         }
     }
 
-    ctx->channel = ibv_create_comp_channel(ctx->context);
-    if(!ctx->channel) {
-        printf("ibv_create_comp_channel error\n");
-        goto clean_device;
-    }
-
     ctx->pd = ibv_alloc_pd(ctx->context);
     if(!ctx->pd) {
         printf("ibv_alloc_pd error\n");
-        goto clean_comp_channel;
+        goto clean_device;
     }
 
     ctx->mr = ibv_reg_mr(ctx->pd, ctx->buf, size + 40, IBV_ACCESS_LOCAL_WRITE);
@@ -132,7 +124,7 @@ init_ctx(struct ibv_device *ib_dev, int size, int port)
         goto clean_pd;
     }
 
-    ctx->cq = ibv_create_cq(ctx->context, 10, NULL, ctx->channel, 0);
+    ctx->cq = ibv_create_cq(ctx->context, 10, NULL, NULL, 0);
     if(!ctx->cq) {
         printf("ibv_create_cq error\n");
         goto clean_mr;
@@ -159,10 +151,6 @@ init_ctx(struct ibv_device *ib_dev, int size, int port)
         }
         //init_attr.cap.max_inline_data = 1024;
         ibv_query_qp(ctx->qp, &attr, IBV_QP_CAP, &init_attr);
-        /*if (init_attr.cap.max_inline_data >= size) {
-            printf("inline on\n");
-            ctx->send_flags |= IBV_SEND_INLINE;
-        }*/
     }
 
     {
@@ -191,9 +179,6 @@ clean_mr:
     ibv_dereg_mr(ctx->mr);
 clean_pd:
     ibv_dealloc_pd(ctx->pd);
-clean_comp_channel:
-    if (ctx->channel)
-        ibv_destroy_comp_channel(ctx->channel);
 clean_device:
     ibv_close_device(ctx->context);
 clean_buffer:
@@ -229,13 +214,6 @@ close_ctx(struct pingpong_context *ctx)
     if (ibv_dealloc_pd(ctx->pd)) {
         fprintf(stderr, "Couldn't deallocate PD\n");
         return 1;
-    }
-
-    if (ctx->channel) {
-        if (ibv_destroy_comp_channel(ctx->channel)) {
-            fprintf(stderr, "Couldn't destroy completion channel\n");
-            return 1;
-        }
     }
 
     if (ibv_close_device(ctx->context)) {
@@ -416,6 +394,48 @@ out:
     return rem_dest;
 }
 
+static int poll_completion(struct pingpong_context *res) {
+    struct ibv_wc wc;
+    unsigned long start_time_msec;
+    unsigned long cur_time_msec;
+    struct timeval cur_time;
+    int poll_result;
+    int rc = 0;
+    /* 获取当前时间 */
+    gettimeofday(&cur_time, NULL);
+    start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
+    do {
+        poll_result = ibv_poll_cq(res->cq, 1, &wc);
+        gettimeofday(&cur_time, NULL);
+        cur_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
+    } while((poll_result == 0) && ((cur_time_msec - start_time_msec) < 5000));
+    if(poll_result < 0) {
+        fprintf(stderr, "无法完成完成队列\n");
+        rc = 1;
+    } else if(poll_result == 0) {
+        fprintf(stderr, "完成队列超时\n");
+        rc = 1;
+    } else {
+        fprintf(stdout, "完成队列完成\n");
+        /* 检查完成的操作是否成功 */
+        if(wc.status != IBV_WC_SUCCESS) {
+            fprintf(stderr, "完成的操作失败，错误码=0x%x，vendor_err=0x%x\n", wc.status, wc.vendor_err);
+            rc = 1;
+        }
+        if(wc.opcode & IBV_WC_RECV) {
+            printf("IBV_WC_RECV ok, %s\n", res->buf + 40);
+        }
+        else if(wc.opcode == IBV_WC_SEND){
+            //gettimeofday(&end_work, NULL);
+            //long work_time = (end_work.tv_usec - start_work.tv_usec); // get the run time by microsecond
+            //printf("work:%ld ",work_time);
+            printf("IBV_WC_SEND ok\n");
+        }
+        rc = 0;
+    }
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     struct ibv_device      **dev_list;
@@ -430,43 +450,6 @@ int main(int argc, char **argv)
     char                     gid[33];
 
     srand48(getpid() * time(NULL));
-    while (1) {
-        int c;
-        static struct option long_options[] = {
-            { .name = "port",     .has_arg = 1, .val = 'p' },
-            { .name = "ib-port",  .has_arg = 1, .val = 'i' },
-            { .name = "size",     .has_arg = 1, .val = 's' },
-            { .name = "sl",       .has_arg = 1, .val = 'l' },
-            {}
-        };
-
-        c = getopt_long(argc, argv, "p:i:s:r:l", long_options, NULL);
-        if (c == -1)
-            break;
-
-        switch (c) {
-        case 'p':
-            port = strtol(optarg, NULL, 0);
-            if (port > 65535) {
-                return 1;
-            }
-            break;
-        case 'i':
-            ib_port = strtol(optarg, NULL, 0);
-            if (ib_port < 1) {
-                return 1;
-            }
-            break;
-        case 's':
-            size = strtoul(optarg, NULL, 0);
-            break;
-        case 'l':
-            sl = strtol(optarg, NULL, 0);
-            break;
-        default:
-            return 1;
-        }
-    }
 
     page_size = sysconf(_SC_PAGESIZE);
     dev_list = ibv_get_device_list(NULL);
@@ -486,12 +469,8 @@ int main(int argc, char **argv)
         printf("init_ctx error\n");
         return -1;
     }
-
     post_recv(ctx);
-    if(ibv_req_notify_cq(ctx->cq, 0)){
-        printf("ibv_req_notify_cq error\n");
-        return -1;
-    }
+
     /*获取lid信息*/
     if(ibv_query_port(ctx->context, ib_port, &ctx->portinfo)){
         printf("ibv_query_port error\n");
@@ -523,33 +502,10 @@ int main(int argc, char **argv)
     printf("remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
            rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
-    int event_num = 0;
-    while (event_num < 1) {
-        struct ibv_cq *cq;
-        struct ibv_wc wc;
-        void *ex_ctx;
-
-        ibv_get_cq_event(ctx->channel, &cq, &ex_ctx);
-        ibv_ack_cq_events(cq, 1);
-        event_num++;
-        ibv_req_notify_cq(cq, 0);
-
-        while(ibv_poll_cq(cq, 1, &wc)) {
-            if(wc.status != IBV_WC_SUCCESS){
-                printf("wc.status != IBV_WC_SUCCESS\n");
-            }
-            if(wc.opcode & IBV_WC_RECV) {
-                printf("IBV_WC_RECV ok, %s\n", ctx->buf + 40);
-                /*strncpy(ctx->buf + 40, "viscore server", sizeof "visocre server");
-                if (post_send(ctx, rem_dest->qpn)) {
-                    printf("Couldn't post send\n");
-                    return 1;
-                }*/
-            }
-            else if(wc.opcode == IBV_WC_SEND){
-                printf("IBV_WC_SEND ok\n");
-            }
-        }
+    if(poll_completion(ctx)) {
+        fprintf(stderr, "无法完成操作\n");
+        close_ctx(ctx);
+        return 0;
     }
 
     if(close_ctx(ctx)){
