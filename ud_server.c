@@ -99,7 +99,7 @@ init_ctx(struct ibv_device *ib_dev, int size, int port)
 
     {
         /*查询端口 mtu大小*/
-        struct ibv_port_attr port_info = {};
+        /*struct ibv_port_attr port_info = {};
         int mtu;
         if(ibv_query_port(ctx->context, port, &port_info)) {
             printf("ibv_query_port error\n");
@@ -109,7 +109,7 @@ init_ctx(struct ibv_device *ib_dev, int size, int port)
         if (size > mtu) {
             printf("Requested size larger than port MTU (%d)\n", mtu);
             goto clean_device;
-        }
+        }*/
     }
 
     ctx->pd = ibv_alloc_pd(ctx->context);
@@ -226,11 +226,11 @@ close_ctx(struct pingpong_context *ctx)
 }
 
 static int
-post_recv(struct pingpong_context *ctx)
+post_recv(struct pingpong_context *ctx, int offset)
 {
     struct ibv_sge list = {
-        .addr   = (uintptr_t) ctx->buf,
-        .length = ctx->size + 40,
+        .addr   = (uintptr_t) ctx->buf + offset,
+        .length = 4096,
         .lkey   = ctx->mr->lkey
     };
     struct ibv_recv_wr wr = {
@@ -411,16 +411,17 @@ static int poll_completion(struct pingpong_context *res) {
     } while((poll_result == 0) && ((cur_time_msec - start_time_msec) < 5000));
     if(poll_result < 0) {
         fprintf(stderr, "无法完成完成队列\n");
-        rc = 1;
+        rc = 0;
     } else if(poll_result == 0) {
         fprintf(stderr, "完成队列超时\n");
-        rc = 1;
+        rc = 0;
     } else {
+        printf("cq num:%d\n", poll_result);
         fprintf(stdout, "完成队列完成\n");
         /* 检查完成的操作是否成功 */
         if(wc.status != IBV_WC_SUCCESS) {
             fprintf(stderr, "完成的操作失败，错误码=0x%x，vendor_err=0x%x\n", wc.status, wc.vendor_err);
-            rc = 1;
+            rc = 0;
         }
         if(wc.opcode & IBV_WC_RECV) {
             printf("IBV_WC_RECV ok, %s\n", res->buf + 40);
@@ -431,7 +432,7 @@ static int poll_completion(struct pingpong_context *res) {
             //printf("work:%ld ",work_time);
             printf("IBV_WC_SEND ok\n");
         }
-        rc = 0;
+        rc = poll_result;
     }
     return rc;
 }
@@ -446,7 +447,7 @@ int main(int argc, char **argv)
     int                      ib_port = 1;
     int                      gidx = 1;
     int                      sl = 0;
-    unsigned int             size = 1024;
+    unsigned int             size = 4096;
     char                     gid[33];
 
     srand48(getpid() * time(NULL));
@@ -469,7 +470,11 @@ int main(int argc, char **argv)
         printf("init_ctx error\n");
         return -1;
     }
-    post_recv(ctx);
+
+    //post_recv(ctx, 3072);
+    //post_recv(ctx, 2048);
+    //post_recv(ctx, 1024);
+    post_recv(ctx, 0);
 
     /*获取lid信息*/
     if(ibv_query_port(ctx->context, ib_port, &ctx->portinfo)){
@@ -502,11 +507,16 @@ int main(int argc, char **argv)
     printf("remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
            rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
-    if(poll_completion(ctx)) {
+    int cnt = 0;
+    while(cnt < 1) {
+        cnt += poll_completion(ctx);
+    }
+
+    /*if(poll_completion(ctx)) {
         fprintf(stderr, "无法完成操作\n");
         close_ctx(ctx);
         return 0;
-    }
+    }*/
 
     if(close_ctx(ctx)){
         printf("close_ctx error \n");

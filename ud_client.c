@@ -24,7 +24,6 @@ static int page_size;
 
 struct pingpong_context {
     struct ibv_context  *context;
-    struct ibv_comp_channel *channel;
     struct ibv_pd       *pd;
     struct ibv_mr       *mr;
     struct ibv_cq       *cq;
@@ -115,16 +114,10 @@ init_ctx(struct ibv_device *ib_dev, int size, int port)
         }
     }
 
-    ctx->channel = ibv_create_comp_channel(ctx->context);
-    if(!ctx->channel) {
-        printf("ibv_create_comp_channel error\n");
-        goto clean_device;
-    }
-
     ctx->pd = ibv_alloc_pd(ctx->context);
     if(!ctx->pd) {
         printf("ibv_alloc_pd error\n");
-        goto clean_comp_channel;
+        goto clean_device;
     }
 
     ctx->mr = ibv_reg_mr(ctx->pd, ctx->buf, size + 40, IBV_ACCESS_LOCAL_WRITE);
@@ -133,7 +126,7 @@ init_ctx(struct ibv_device *ib_dev, int size, int port)
         goto clean_pd;
     }
 
-    ctx->cq = ibv_create_cq(ctx->context, 10, NULL, ctx->channel, 0);
+    ctx->cq = ibv_create_cq(ctx->context, 10, NULL, NULL, 0);
     if(!ctx->cq) {
         printf("ibv_create_cq error\n");
         goto clean_mr;
@@ -188,9 +181,6 @@ clean_mr:
     ibv_dereg_mr(ctx->mr);
 clean_pd:
     ibv_dealloc_pd(ctx->pd);
-clean_comp_channel:
-    if (ctx->channel)
-        ibv_destroy_comp_channel(ctx->channel);
 clean_device:
     ibv_close_device(ctx->context);
 clean_buffer:
@@ -226,13 +216,6 @@ close_ctx(struct pingpong_context *ctx)
     if (ibv_dealloc_pd(ctx->pd)) {
         fprintf(stderr, "Couldn't deallocate PD\n");
         return 1;
-    }
-
-    if (ctx->channel) {
-        if (ibv_destroy_comp_channel(ctx->channel)) {
-            fprintf(stderr, "Couldn't destroy completion channel\n");
-            return 1;
-        }
     }
 
     if (ibv_close_device(ctx->context)) {
@@ -287,9 +270,6 @@ post_send(struct pingpong_context *ctx, uint32_t qpn)
     };
     struct ibv_send_wr *bad_wr;
     int ret = ibv_post_send(ctx->qp, &wr, &bad_wr);
-    if(ret) {
-        //printf("%d\n", (bad_wr->wr).ud.remote_qkey);
-    }
     return ret;
 }
 
@@ -410,16 +390,16 @@ static int poll_completion(struct pingpong_context *res) {
     } while((poll_result == 0) && ((cur_time_msec - start_time_msec) < 5000));
     if(poll_result < 0) {
         fprintf(stderr, "无法完成完成队列\n");
-        rc = 1;
+        rc = 0;
     } else if(poll_result == 0) {
         fprintf(stderr, "完成队列超时\n");
-        rc = 1;
+        rc = 0;
     } else {
         //fprintf(stdout, "完成队列完成\n");
         /* 检查完成的操作是否成功 */
         if(wc.status != IBV_WC_SUCCESS) {
             fprintf(stderr, "完成的操作失败，错误码=0x%x，vendor_err=0x%x\n", wc.status, wc.vendor_err);
-            rc = 1;
+            rc = 0;
         }
         if(wc.opcode & IBV_WC_RECV) {
             printf("IBV_WC_RECV ok, %s\n", res->buf + 40);
@@ -430,7 +410,7 @@ static int poll_completion(struct pingpong_context *res) {
             printf("work:%ld ",work_time);
             //printf("IBV_WC_SEND ok\n");
         }
-        rc = 0;
+        rc = poll_result;
     }
     return rc;
 }
@@ -438,9 +418,12 @@ static int poll_completion(struct pingpong_context *res) {
 int main(int argc, char **argv)
 {    
     //freopen("T","w",stdout);
-    char teststr[5000];memset(teststr,0,sizeof(teststr));
-    for(int i=0;i<5000;i++)teststr[i]='a';
-    
+    char teststr1[5000];memset(teststr1,0,sizeof(teststr1));
+    char teststr2[5000];memset(teststr2,0,sizeof(teststr2));
+    char teststr3[5000];memset(teststr3,0,sizeof(teststr3));
+    char teststr4[5000];memset(teststr4,0,sizeof(teststr4));
+    for(int i=0;i<2000;i++)teststr1[i]='a',teststr2[i]='b',teststr3[i]='c',teststr4[i]='d';
+
     struct timeval start, tmp, end;  // define 2 struct timeval variables
     gettimeofday(&start, NULL); // get the beginning time
 
@@ -530,19 +513,41 @@ int main(int argc, char **argv)
         printf("connect_ctx error\n");
         return -1;
     }
-
     //准备buff
-    memcpy(ctx->buf + 40, teststr, ctx->size);
+    memcpy(ctx->buf + 40, teststr1, ctx->size);
     if (post_send(ctx, rem_dest->qpn)) {
         printf("Couldn't post send\n");
         return -1;
     }
 
-    if(poll_completion(ctx)) {
+    /*memcpy(ctx->buf + 40, teststr2, ctx->size);
+    if (post_send(ctx, rem_dest->qpn)) {
+        printf("Couldn't post send\n");
+        return -1;
+    }
+
+    memcpy(ctx->buf + 40, teststr3, ctx->size);
+    if (post_send(ctx, rem_dest->qpn)) {
+        printf("Couldn't post send\n");
+        return -1;
+    }
+
+    memcpy(ctx->buf + 40, teststr4, ctx->size);
+    if (post_send(ctx, rem_dest->qpn)) {
+        printf("Couldn't post send\n");
+        return -1;
+    }*/
+
+    int cnt = 0;
+    while(cnt < 1) {
+        cnt += poll_completion(ctx);
+    }
+
+    /*if(!poll_completion(ctx)) {
         fprintf(stderr, "无法完成操作\n");
         close_ctx(ctx);
         return 0;
-    }
+    }*/
 
     if(close_ctx(ctx)){
         printf("close_ctx error \n");
@@ -554,6 +559,5 @@ int main(int argc, char **argv)
     gettimeofday(&end, NULL);  // get the end time
     long long total_time = (end.tv_sec-start.tv_sec)*1000000+(end.tv_usec-start.tv_usec);
     printf("total:%lld\n",total_time);
-    usleep(100000);
     return 0;
 }
