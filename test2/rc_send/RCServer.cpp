@@ -136,15 +136,50 @@ struct ServerContext {
         // <<remote_info.lid<<" "<<remote_info.gid<<endl;
     }
 
+    int poll_completion(ibv_cq *cq, int& pos) {
+        struct ibv_wc wc[1024];
+        unsigned long start_time_msec;
+        unsigned long cur_time_msec;
+        struct timeval cur_time;
+        int poll_result;
+        /* 获取当前时间 */
+        gettimeofday(&cur_time, NULL);
+        start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
+        do {
+            poll_result = ibv_poll_cq(cq, 1024, wc);
+            gettimeofday(&cur_time, NULL);
+            cur_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
+        } while((poll_result == 0) && ((cur_time_msec - start_time_msec) < 5000));
+        if(poll_result < 0) {
+            fprintf(stderr, "无法完成完成队列\n");
+        } else if(poll_result == 0) {
+            fprintf(stderr, "完成队列超时\n");
+        } else {
+            //fprintf(stdout, "完成队列完成\n");
+            /* 检查完成的操作是否成功 */
+            //cout<<"in rdma.cpp: poll suc " << poll_result <<endl;
+            for(int i = 0; i < poll_result; i++){
+                if(wc[i].status != IBV_WC_SUCCESS) {
+                    fprintf(stderr, "完成的操作失败，错误码=0x%x，vendor_err=0x%x\n", wc[i].status, wc[i].vendor_err);
+                    poll_result = i;
+                }
+                post_recv(buf + pos*pack_size, pack_size, mr->lkey, qp, 0);
+                pos=(pos+1)%1024;
+            }
+        }
+        return poll_result;
+    }
 } s_ctx;
 int main() {
-    //for(int i=0;i<100;i++){
+    for(int i=0;i<10;i++){
     s_ctx.CreateContext();
-    s_ctx.Server(0);
+    s_ctx.Server(i);
     if(modify_qp_to_init(s_ctx.qp, s_ctx.remote_info)) {
         exit(0);
     }
-    post_recv(s_ctx.buf, 4096, s_ctx.mr->lkey, s_ctx.qp, 0);
+    for(int i = 0; i < 10240; i++) {
+        post_recv(s_ctx.buf + (i%1024)*pack_size, pack_size, s_ctx.mr->lkey, s_ctx.qp, 0);
+    }
     if(modify_qp_to_rtr(s_ctx.qp, s_ctx.remote_info)) {
         exit(0);
     }
@@ -157,12 +192,19 @@ int main() {
         cerr << "send失败" <<endl;
         exit(0);
     }*/
-    if(poll_completion(s_ctx.cq)) {
-        cerr << "轮询失败" <<endl;
-        exit(0);
+    int sum = 0, pos = 0, tot_num = 1ll*1024*1024*100*100/pack_size;
+    while(sum < tot_num) {
+        int cnt = 0, tmp = 0;
+        cnt = s_ctx.poll_completion(s_ctx.cq, pos);
+        if(cnt <= 0) {
+            cerr << "sum: "<<sum<<"   轮询失败 " <<cnt<<endl;
+            exit(0);
+        }
+        sum += cnt;
     }
-    cout << s_ctx.buf << endl;
+    //cout << s_ctx.buf << endl;
+    cout<< sum << " " << tot_num << endl;
     s_ctx.DestroyContext();
-    //}
+    }
     return 0;
 }
