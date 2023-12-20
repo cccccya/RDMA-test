@@ -12,8 +12,13 @@
 #include <cstdio>
 #include <byteswap.h>
 
-constexpr int cq_size = 100;
-constexpr int BUF_SIZE = 1024*1024;
+constexpr int cq_size = 1024;
+
+constexpr int pack_size = 65535;
+
+constexpr int BUF_SIZE = pack_size*1024;
+
+
 
 struct config_t {
     const char *dev_name;   /* IB设备名称 */
@@ -26,7 +31,7 @@ struct config_t {
 constexpr config_t config = {
     "mlx5_0",   /* dev_name */
     nullptr,   /* server_name */
-    19875,  /* tcp_port */
+    19775,  /* tcp_port */
     1,      /* ib_port */
     3      /* gid_idx */
 };
@@ -54,5 +59,4 @@ int modify_qp_to_rtr(struct ibv_qp *qp, RdmaConnExchangeInfo remote_info);
 int modify_qp_to_rts(struct ibv_qp *qp, RdmaConnExchangeInfo remote_info);
 int post_recv(const void *buf, uint32_t	len, uint32_t lkey, ibv_qp *qp, int wr_id);
 int post_send(const void *buf, uint32_t	len, uint32_t lkey, ibv_qp *qp, int wr_id, enum ibv_wr_opcode opcode, uint64_t remote_addr, uint32_t remote_rkey);
-int poll_completion(ibv_cq *cq);
 #endif // RDMA_H

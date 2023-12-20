@@ -46,8 +46,8 @@ ibv_qp *CreateQP(ibv_pd *pd, ibv_cq *send_cq, ibv_cq *recv_cq, ibv_qp_type qp_ty
     qp_init_attr.sq_sig_all = 1; // 向所有 WR 发送信号
     qp_init_attr.send_cq = send_cq; // 发送完成队列
     qp_init_attr.recv_cq = recv_cq; // 接收完成队列
-    qp_init_attr.cap.max_send_wr = 10; // 最大发送 WR 数量
-    qp_init_attr.cap.max_recv_wr = 10; // 最大接收 WR 数量
+    qp_init_attr.cap.max_send_wr = 1024; // 最大发送 WR 数量
+    qp_init_attr.cap.max_recv_wr = 10240; // 最大接收 WR 数量
     qp_init_attr.cap.max_send_sge = 1; // 最大发送 SGE 数量
     qp_init_attr.cap.max_recv_sge = 1; // 最大接收 SGE 数量
     return ibv_create_qp(pd, &qp_init_attr);
@@ -189,36 +189,4 @@ int post_send(const void *buf, uint32_t	len, uint32_t lkey, ibv_qp *qp, int wr_i
     }
     ret = ibv_post_send(qp, &wr, &bad_wr);
     return ret;
-}
-
-int poll_completion(ibv_cq *cq) {
-    struct ibv_wc wc;
-    unsigned long start_time_msec;
-    unsigned long cur_time_msec;
-    struct timeval cur_time;
-    int poll_result;
-    int rc = 0;
-    /* 获取当前时间 */
-    gettimeofday(&cur_time, NULL);
-    start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
-    do {
-        poll_result = ibv_poll_cq(cq, 1, &wc);
-        gettimeofday(&cur_time, NULL);
-        cur_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
-    } while((poll_result == 0) && ((cur_time_msec - start_time_msec) < 5000));
-    if(poll_result < 0) {
-        fprintf(stderr, "无法完成完成队列\n");
-        rc = 1;
-    } else if(poll_result == 0) {
-        fprintf(stderr, "完成队列超时\n");
-        rc = 1;
-    } else {
-        //fprintf(stdout, "完成队列完成\n");
-        /* 检查完成的操作是否成功 */
-        if(wc.status != IBV_WC_SUCCESS) {
-            fprintf(stderr, "完成的操作失败，错误码=0x%x，vendor_err=0x%x\n", wc.status, wc.vendor_err);
-            rc = 1;
-        }
-    }
-    return rc;
 }
