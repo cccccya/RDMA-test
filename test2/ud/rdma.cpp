@@ -86,11 +86,11 @@ ibv_ah *CreateAH(ibv_pd *pd, int port, int sl, RdmaUDConnExchangeInfo dest, int 
     return ibv_create_ah(pd, &ah_attr);
 }
 
-ibv_qp *CreateQP(ibv_pd *pd, ibv_cq *send_cq, ibv_cq *recv_cq, ibv_qp_type qp_type) {
     ibv_qp_init_attr qp_init_attr;
+ibv_qp *CreateQP(ibv_pd *pd, ibv_cq *send_cq, ibv_cq *recv_cq, ibv_qp_type qp_type) {
     memset(&qp_init_attr, 0, sizeof(qp_init_attr));
     qp_init_attr.qp_type = qp_type;
-    //qp_init_attr.sq_sig_all = 1; // 向所有 WR 发送信号
+    qp_init_attr.sq_sig_all = 1; // 向所有 WR 发送信号
     qp_init_attr.send_cq = send_cq; // 发送完成队列
     qp_init_attr.recv_cq = recv_cq; // 接收完成队列
     qp_init_attr.cap.max_send_wr = cq_size; // 最大发送 WR 数量

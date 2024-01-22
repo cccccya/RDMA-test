@@ -1,13 +1,10 @@
 #include "rdma.h"
 #include <vector>
+#include <csignal>
 
 using std::cerr;
 using std::endl;
 using std::cout;
-
-constexpr int BUF_SIZE = 32 * 1024 * 1064;//1GB
-constexpr int PACKET_SIZE = 1024;
-
 
 static inline uint64_t htonll(uint64_t x)
 {
@@ -22,6 +19,7 @@ struct ServerContext {
     RdmaDeviceInfo dev_info;     /* 设备信息 */
     ibv_pd *pd;                  /* 保护域 */
     ibv_cq *cq;                  /* 完成队列 */
+    ibv_cq_ex *cq_ex;
     ibv_qp *qp;                  /* 队列对 */
     ibv_mr *mr;                  /* 内存区域 */
     char *buf;                   /* 用于存储数据的缓冲区 */
@@ -129,6 +127,7 @@ struct ServerContext {
         local_info.lid = htons(dev_info.port_attr.lid);
         local_info.psn = htonl(lrand48() & 0xffffff);
         local_info.gid = my_gid;
+        local_info.gid_idx = htonl(3);//magic
         
         /*cout<<"addr:"<< (uintptr_t)buf << endl;
         cout<<"qkey:"<< 0x11111111 << endl;
@@ -146,7 +145,7 @@ struct ServerContext {
         remote_info.lid = ntohs(tmp_info.lid);
         remote_info.psn = ntohl(tmp_info.psn);
         remote_info.gid = tmp_info.gid;
-        remote_info.gid_idx = 3;
+        remote_info.gid_idx = ntohl(tmp_info.gid_idx);
         /*cout<<"addr:"<< remote_info.addr << endl;
         cout<<"qkey:"<< remote_info.qkey << endl;
         cout<<"qpn:"<< remote_info.qpn << endl;
@@ -154,10 +153,21 @@ struct ServerContext {
         cout<<"psn:"<< remote_info.psn << endl;
         cout<<"client:"<<RdmaGid2Str(remote_info.gid)<<endl;*/
     }
-
 } s_ctx;
-int main() {
-    double avg_dk = 0,avg_t = 0;
+int all;
+void signalHandler(int signum) {
+    if (signum == SIGTSTP) {
+        std::cout << "Received Ctrl+Z signal. Outputting values..." << std::endl;
+
+        // 在这里添加你想要输出的值或执行的操作
+        cout << all<<endl;
+        // 退出程序
+        exit(signum);
+    }
+}
+int main(int argc, char **argv) {
+    signal(SIGTSTP, signalHandler);
+    double avg_dk = 0,avg_t = 0, avg_ah = 0;
     for(int i = 0;i<20;i++) {
     s_ctx.CreateContext();
     s_ctx.Server(i);
@@ -165,6 +175,7 @@ int main() {
     if(modify_qp_to_init(s_ctx.qp, s_ctx.remote_info)) {
         exit(0);
     }
+    for(int i=0;i<cq_size;i++) post_recv(s_ctx.buf + i*(PACKET_SIZE+40)%BUF_SIZE, PACKET_SIZE+40, s_ctx.mr->lkey, s_ctx.qp, 1);
     //post_recv(s_ctx.buf, PACKET_SIZE+40, s_ctx.mr->lkey, s_ctx.qp, 1);
     if(modify_qp_to_rtr(s_ctx.qp, s_ctx.remote_info)) {
         exit(0);
@@ -173,25 +184,44 @@ int main() {
         exit(0);
     }
     /* 创建AH */
+    uint64_t start_ah, end_ah;
+    start_ah = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock().now().time_since_epoch()).count();
     s_ctx.ah = CreateAH(s_ctx.pd, config.ib_port, 0, s_ctx.remote_info, 3);
     if(s_ctx.ah == nullptr) {
         cerr << "Create ah failed" << endl;
         exit(0);
     }
-
+    end_ah = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock().now().time_since_epoch()).count();
+    cout<<"create ah:"<< 1.0*(end_ah - start_ah)/1000.0 << endl;
+    avg_ah += 1.0*(end_ah - start_ah)/1000.0;
+    cout<<"finish connect"<<endl;
     ibv_wc wc[cq_size]{};
     uint64_t timer{}, start{};
     long long recv_Byte = 0;
     int recv_wait = 0, pos = 0, recv_cnt = 0, recvpos = 0, last_recv_cnt = 0;
     std::vector<double> T;
-    char buf[4096];
-    while(recv_Byte < sendBytes/2) {
-        if(recv_wait < cq_size) post_recv(s_ctx.buf + pos, 1064, s_ctx.mr->lkey, s_ctx.qp, 1), pos = (pos + 1064) % BUF_SIZE, recv_wait++;
-        int wc_num = ibv_poll_cq(s_ctx.cq, 1, wc);
+    char buf[PACKET_SIZE];
+    int lastpos = 0,lastcnt = 0;
+    int cq_num_upper4 = 0, cq_num_lower4 = 0;
+    all =0;
+    while(recv_Byte < (1ll<<33)) {
+        //if(pos!=lastpos)cout<<pos<<endl,lastpos = pos;
+        if(recv_wait < cq_size) post_recv(s_ctx.buf + pos, PACKET_SIZE+40, s_ctx.mr->lkey, s_ctx.qp, 1), pos = (pos + PACKET_SIZE + 40) % BUF_SIZE, recv_wait++;
+        int wc_num = ibv_poll_cq(s_ctx.cq, 1024, wc);
         recv_wait -= wc_num;
-        if(wc_num) {
-            if(!start) start = timer = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock().now().time_since_epoch()).count();
+
+        all += wc_num;
+
+        if(wc_num > 4) cq_num_upper4++;
+        else cq_num_lower4++;
+
+        if(wc_num>0) {
+            if(!start) {
+                start = timer = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock().now().time_since_epoch()).count();
+            }
             else if(recv_cnt - last_recv_cnt >= 4){
                 uint64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock().now().time_since_epoch()).count();
@@ -206,9 +236,11 @@ int main() {
                 switch (wc[i].opcode) {
                 case IBV_WC_RECV:{
 
-                    recv_Byte += 1024, recv_cnt++;
-                    memcpy(buf, s_ctx.buf+recvpos+40, 1024);
-                    recvpos=(recvpos+1064)%BUF_SIZE;
+                    recv_Byte += PACKET_SIZE, recv_cnt++;
+                    memcpy(buf, s_ctx.buf+recvpos+40, PACKET_SIZE);
+                    //if(all>7443862)cout<<"pos: "<<recvpos+40<<"debug:"<<" "<<(int)s_ctx.buf[recvpos+40]<<" "<<(int)s_ctx.buf[recvpos+41]<<" "<<(int)s_ctx.buf[recvpos+42]<<" "<<(int)s_ctx.buf[recvpos+43]<<" "<<endl;
+                    //if(all>7443862)cout<<"all: "<<all<<"debug:"<<" "<<(int)buf[0]<<" "<<(int)buf[1]<<" "<<(int)buf[2]<<" "<<(int)buf[3]<<" "<<endl;
+                    recvpos=(recvpos+PACKET_SIZE+40)%BUF_SIZE;
                     break;
                 }
                 default:
@@ -216,8 +248,10 @@ int main() {
                 }
             }
         }
+        //else if(all!=lastcnt&&all>7380600)printf("all:%d\n", all),lastcnt = all;
     }
-    printf("%.2lf\n",recv_Byte/1024.0/1024/(timer-start)*1e9);//计算带宽
+    cout<<"upper4:"<<cq_num_upper4<<" lower4:"<<cq_num_lower4<<endl;
+    printf("带宽：%.2lf\n",recv_Byte/1024.0/1024/(timer-start)*1e9);//计算带宽
     avg_dk+=recv_Byte/1024.0/1024/(timer-start)*1e9;
     cout<<"T size:"<<T.size()<<"  recv_cnt:"<<recv_cnt<<endl;
     double sum = 0;
@@ -226,9 +260,9 @@ int main() {
     }
     double avg = sum/T.size();
     avg_t+=avg;
-    printf("%.4lf\n",avg);
+    printf("平均时延：%.4lf\n",avg);
     s_ctx.DestroyContext();
     }
-    cout<<avg_dk/20<<" "<<avg_t/20<<endl;
+    cout<<avg_dk/20<<" "<<avg_t/20<<" "<<avg_ah/20<<endl;
     return 0;
 }

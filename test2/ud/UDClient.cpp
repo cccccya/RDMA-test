@@ -5,8 +5,6 @@ using std::cerr;
 using std::endl;
 using std::cout;
 
-constexpr int BUF_SIZE = 1024 * 1024 * 1024;//1GB
-
 static inline uint64_t htonll(uint64_t x)
 {
     return bswap_64(x);
@@ -121,6 +119,7 @@ struct ClientContext {
         local_info.lid = htons(dev_info.port_attr.lid);
         local_info.psn = htonl(lrand48() & 0xffffff);
         local_info.gid = my_gid;
+        local_info.gid_idx = htonl(3);//magic
         /*cout<<"addr:"<< (uintptr_t)buf << endl;
         cout<<"qkey:"<< 0x11111111 << endl;
         cout<<"qpn:"<< qp->qp_num << endl;
@@ -137,7 +136,7 @@ struct ClientContext {
         remote_info.lid = ntohs(tmp_info.lid);
         remote_info.psn = ntohl(tmp_info.psn);
         remote_info.gid = tmp_info.gid;
-        remote_info.gid_idx = 3;
+        remote_info.gid_idx = ntohl(tmp_info.gid_idx);
         /*cout<<"addr:"<< remote_info.addr << endl;
         cout<<"qkey:"<< remote_info.qkey << endl;
         cout<<"qpn:"<< remote_info.qpn << endl;
@@ -146,6 +145,18 @@ struct ClientContext {
         cout<<"server:"<<RdmaGid2Str(remote_info.gid)<<endl;*/
     }
 } s_ctx;
+
+void jiayi(char* buf, int pos) {
+    if(buf[pos]==127)buf[pos] = 0,jiayi(buf,pos-1);
+    else buf[pos]++;
+}
+
+void padding(char* buf, int pos, int value) {
+    buf[pos+3] = value%128;
+    buf[pos+2] = value/128%128;
+    buf[pos+1] = value/128/128%128;
+    buf[pos] = value/128/128/128%128;
+}
 
 int main(int argc, char **argv) {
     char str[5000];for(int i=0;i<5000;i++)str[i]='a';
@@ -175,29 +186,40 @@ int main(int argc, char **argv) {
         cerr << "Create ah failed" << endl;
         exit(0);
     }
-    memcpy(s_ctx.buf,str,4096);
-
-    int wc_wait = 0, send_cnt = 0 ,sum = 0;
+    //memcpy(s_ctx.buf,str,4096);
+    cout<<"finish connect"<<endl;
+    int wc_wait = 0, send_cnt = 0 ,sum = 0, send_buf_pos = 0;
     ibv_wc wc[cq_size]{};
-    for(long long i = 0; i < sendBytes; i += 1024) {
-        while(wc_wait >= cq_size){
-            wc_wait -= ibv_poll_cq(s_ctx.cq, cq_size, wc);
+    sleep(1);
+    for(long long i = 0; i < sendBytes; i += PACKET_SIZE) {
+        while(wc_wait >= 100){
+            int cnt = ibv_poll_cq(s_ctx.cq, cq_size, wc);
+            wc_wait -= cnt;
+            sum += cnt;
         }
-        if(post_send(s_ctx.buf+40, 1024, s_ctx.mr->lkey, s_ctx.qp, 2, IBV_WR_SEND, s_ctx.ah, s_ctx.remote_info)) {
+        //padding(s_ctx.buf, send_buf_pos, send_cnt);
+        //if(send_cnt<100) cout<<"debug:"<<" "<<(int)s_ctx.buf[send_buf_pos]<<" "<<(int)s_ctx.buf[send_buf_pos+1]<<" "<<(int)s_ctx.buf[send_buf_pos+2]<<" "<<(int)s_ctx.buf[send_buf_pos+3]<<" "<<endl;
+        if(post_send(s_ctx.buf+send_buf_pos, PACKET_SIZE, s_ctx.mr->lkey, s_ctx.qp, 2, IBV_WR_SEND, s_ctx.ah, s_ctx.remote_info)) {
             cerr << "send失败" <<endl;
             exit(0);
         }
+        send_buf_pos = (send_buf_pos+PACKET_SIZE)%BUF_SIZE;
         wc_wait++; send_cnt++;
         int cnt = ibv_poll_cq(s_ctx.cq, cq_size, wc);
         wc_wait -= cnt;
         sum += cnt;
+        //usleep(10);
         //cout<<i<<" ";
     }
-    while(sum<sendBytes/1024){
+    cout<<"finish send"<<endl;
+    int lastcnt = sum;cout<<sum<<endl;
+    while(sum<sendBytes/PACKET_SIZE){
         sum += ibv_poll_cq(s_ctx.cq, cq_size, wc);
+        //if(sum!=lastcnt&&sum >8387500)cout<<sum<<" ", lastcnt = sum;
     }
     cout << send_cnt << endl;
     s_ctx.DestroyContext();
+    sleep(1);
     }
     return 0;
 }

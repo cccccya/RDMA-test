@@ -13,8 +13,11 @@
 #include <byteswap.h>
 #include <chrono>
 
-constexpr int cq_size = 1024;
-constexpr long long sendBytes = (1ll<<34);
+constexpr int cq_size = 9000;
+constexpr long long sendBytes = (1ll<<33);
+constexpr int PACKET_SIZE = 1024;
+constexpr int BUF_SIZE = 100 * 1024 * 1064;
+
 using std::string;
 
 struct config_t {
@@ -28,7 +31,7 @@ struct config_t {
 constexpr config_t config = {
     "mlx5_0",   /* dev_name */
     nullptr,   /* server_name */
-    19985,  /* tcp_port */
+    19885,  /* tcp_port */
     1,      /* ib_port */
     3      /* gid_idx */
 };
